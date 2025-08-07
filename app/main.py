@@ -9,10 +9,13 @@ app = FastAPI(
     version="1.0.0",
 )
 
+origins = [
+    "https://easy-apply-brown.vercel.app",  # Vercel frontend URL
+]
 # Set up CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_HOSTS,
+    allow_origins=origins,  # or ["*"] for all, not recommended for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
