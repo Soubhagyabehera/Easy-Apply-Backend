@@ -8,13 +8,13 @@ router = APIRouter()
 mock_users = [
     {
         "id": 1,
-        "email": "john.doe@example.com",
-        "full_name": "John Doe",
+        "email": "soubhagya225bdk@gmail.com",
+        "full_name": "Rithcik",
         "is_active": True,
         "profile": {
             "skills": ["Python", "FastAPI", "React"],
             "experience_years": 5,
-            "location": "San Francisco, CA"
+            "location": "Chennai, India"
         }
     }
 ]
