@@ -10,8 +10,6 @@ from playwright.sync_api import sync_playwright
 from openai import AsyncOpenAI
 import nest_asyncio
 
-# Fix for Windows asyncio issues
-nest_asyncio.apply()
 
 logger = logging.getLogger(__name__)
 
