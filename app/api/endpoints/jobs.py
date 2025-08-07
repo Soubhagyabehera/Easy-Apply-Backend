@@ -160,62 +160,143 @@ async def get_government_jobs(
     department: Optional[str] = Query(None, description="Filter by department")
 ):
     """
-    Get government jobs from OpenAI discovery in frontend-compatible format.
+    Get government jobs - currently returning mock data while OpenAI integration is being fixed.
     
-    This endpoint:
-    1. Calls the job discovery service to get government jobs
-    2. Transforms the data into Job schema format for the frontend
-    3. Applies filters if provided
-    4. Returns jobs ready for dashboard display
+    This endpoint returns default government job listings for testing the frontend dashboard.
+    Filters are applied if provided.
     """
     try:
-        logger.info("Fetching government jobs for frontend dashboard")
+        logger.info("Fetching government jobs for frontend dashboard (using mock data)")
         
-        # Get discovered jobs from the service
-        discovery_results = await job_discovery_service.discover_all_jobs()
+        # Mock government jobs data
+        mock_government_jobs = [
+            {
+                "id": 1,
+                "title": "Assistant Manager - Finance",
+                "company": "State Bank of India",
+                "organization": "State Bank of India",
+                "location": "Mumbai, Delhi, Bangalore",
+                "description": "Recruitment for Assistant Manager position in Finance department. Candidates should have experience in banking and finance.",
+                "requirements": ["Graduate degree in Finance/Commerce", "2-3 years banking experience", "Knowledge of banking regulations"],
+                "salary_range": "₹8-12 LPA",
+                "apply_url": "https://sbi.co.in/careers",
+                "posted_date": "2024-01-15",
+                "last_date": "2024-02-15",
+                "career_url": "https://sbi.co.in/careers",
+                "job_type": "Government",
+                "department": "Banking",
+                "experience_required": "2-3 years",
+                "is_active": True
+            },
+            {
+                "id": 2,
+                "title": "Junior Engineer - Civil",
+                "company": "Indian Railways",
+                "organization": "Indian Railways",
+                "location": "Pan India",
+                "description": "Recruitment for Junior Engineer positions in Civil Engineering department across various railway zones.",
+                "requirements": ["Diploma/B.Tech in Civil Engineering", "Fresh graduates welcome", "Knowledge of railway construction"],
+                "salary_range": "₹5-8 LPA",
+                "apply_url": "https://indianrailways.gov.in/recruitment",
+                "posted_date": "2024-01-10",
+                "last_date": "2024-02-10",
+                "career_url": "https://indianrailways.gov.in/recruitment",
+                "job_type": "Government",
+                "department": "Engineering",
+                "experience_required": "0-2 years",
+                "is_active": True
+            },
+            {
+                "id": 3,
+                "title": "Tax Assistant",
+                "company": "Income Tax Department",
+                "organization": "Income Tax Department",
+                "location": "Delhi, Mumbai, Chennai",
+                "description": "Recruitment for Tax Assistant positions in Income Tax Department. Handle tax assessments and taxpayer services.",
+                "requirements": ["Graduate degree", "Knowledge of taxation laws", "Computer proficiency"],
+                "salary_range": "₹4-7 LPA",
+                "apply_url": "https://incometax.gov.in/careers",
+                "posted_date": "2024-01-12",
+                "last_date": "2024-02-12",
+                "career_url": "https://incometax.gov.in/careers",
+                "job_type": "Government",
+                "department": "Taxation",
+                "experience_required": "0-1 years",
+                "is_active": True
+            },
+            {
+                "id": 4,
+                "title": "Staff Nurse",
+                "company": "AIIMS Delhi",
+                "organization": "AIIMS Delhi",
+                "location": "New Delhi",
+                "description": "Recruitment for Staff Nurse positions at All India Institute of Medical Sciences, Delhi.",
+                "requirements": ["B.Sc Nursing degree", "Registered Nurse license", "1-2 years experience preferred"],
+                "salary_range": "₹6-9 LPA",
+                "apply_url": "https://aiims.edu/careers",
+                "posted_date": "2024-01-08",
+                "last_date": "2024-02-08",
+                "career_url": "https://aiims.edu/careers",
+                "job_type": "Government",
+                "department": "Healthcare",
+                "experience_required": "1-2 years",
+                "is_active": True
+            },
+            {
+                "id": 5,
+                "title": "Forest Guard",
+                "company": "Ministry of Environment",
+                "organization": "Ministry of Environment",
+                "location": "Uttarakhand, Himachal Pradesh",
+                "description": "Recruitment for Forest Guard positions to protect and conserve forest resources.",
+                "requirements": ["10+2 qualification", "Physical fitness", "Knowledge of local flora and fauna"],
+                "salary_range": "₹3-5 LPA",
+                "apply_url": "https://moef.gov.in/careers",
+                "posted_date": "2024-01-05",
+                "last_date": "2024-02-05",
+                "career_url": "https://moef.gov.in/careers",
+                "job_type": "Government",
+                "department": "Environment",
+                "experience_required": "0-1 years",
+                "is_active": True
+            },
+            {
+                "id": 6,
+                "title": "Assistant Professor - Computer Science",
+                "company": "IIT Delhi",
+                "organization": "IIT Delhi",
+                "location": "New Delhi",
+                "description": "Faculty recruitment for Assistant Professor position in Computer Science and Engineering department.",
+                "requirements": ["PhD in Computer Science", "Research publications", "Teaching experience preferred"],
+                "salary_range": "₹15-25 LPA",
+                "apply_url": "https://iitd.ac.in/careers",
+                "posted_date": "2024-01-20",
+                "last_date": "2024-03-20",
+                "career_url": "https://iitd.ac.in/careers",
+                "job_type": "Government",
+                "department": "Education",
+                "experience_required": "3-5 years",
+                "is_active": True
+            }
+        ]
         
-        # Transform discovered jobs into Job schema format
-        jobs = []
-        job_id = 1
-        
-        for org_result in discovery_results:
-            org_name = org_result['organization']
-            career_url = org_result['career_url']
+        # Apply filters if provided
+        filtered_jobs = []
+        for job in mock_government_jobs:
+            # Apply location filter
+            if location and location.lower() not in job['location'].lower():
+                continue
+            # Apply organization filter
+            if organization and organization.lower() not in job['organization'].lower():
+                continue
+            # Apply department filter
+            if department and department.lower() not in job['department'].lower():
+                continue
             
-            for job_data in org_result['jobs']:
-                # Create Job object from discovered data
-                job = {
-                    "id": job_id,
-                    "title": job_data['title'],
-                    "company": org_name,
-                    "organization": org_name,
-                    "location": "India",  # Default location
-                    "description": f"Government job at {org_name}",
-                    "requirements": ["As per official notification"],
-                    "salary_range": "As per government norms",
-                    "apply_url": job_data['apply_url'],
-                    "posted_date": job_data.get('posted_date', 'Recently'),
-                    "last_date": job_data.get('last_date', 'Check notification'),
-                    "career_url": career_url,
-                    "job_type": "Government",
-                    "department": org_name,  # Use organization as department
-                    "experience_required": "As per notification",
-                    "is_active": True
-                }
-                
-                # Apply filters
-                if location and location.lower() not in job['location'].lower():
-                    continue
-                if organization and organization.lower() not in job['organization'].lower():
-                    continue
-                if department and department.lower() not in job['department'].lower():
-                    continue
-                
-                jobs.append(job)
-                job_id += 1
+            filtered_jobs.append(job)
         
-        logger.info(f"Returning {len(jobs)} government jobs for frontend")
-        return jobs
+        logger.info(f"Returning {len(filtered_jobs)} government jobs for frontend (mock data)")
+        return filtered_jobs
         
     except Exception as e:
         logger.error(f"Error fetching government jobs for frontend: {e}")
