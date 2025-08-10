@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import api_router
 from app.core.config import settings
+from app.database.supabase_client import postgresql_client
+import logging
 
 app = FastAPI(
     title="JobBot API",
@@ -9,13 +11,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-origins = [
-    "https://easy-apply-brown.vercel.app",  # Vercel frontend URL
-]
 # Set up CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # or ["*"] for all, not recommended for prod
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,6 +22,22 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router, prefix="/api/v1")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database and other startup tasks"""
+    logger = logging.getLogger(__name__)
+    logger.info("Starting JobBot API...")
+    
+    try:
+        # Initialize PostgreSQL database
+        logger.info("Initializing PostgreSQL database...")
+        postgresql_client.ensure_jobs_table_exists()
+        logger.info("PostgreSQL database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize PostgreSQL database: {e}")
+        # Don't fail startup, just log the error
+        logger.warning("Continuing startup without database initialization")
 
 @app.get("/")
 async def root():
