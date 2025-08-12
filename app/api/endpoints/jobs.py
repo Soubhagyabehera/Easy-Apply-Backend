@@ -25,12 +25,40 @@ class JobDiscoveryRequest(BaseModel):
     location: Optional[str] = "India"
     job_type: Optional[str] = "government"
 
+class EligibilityCriteria(BaseModel):
+    education_qualification: Optional[str] = None
+    age_limit: Optional[str] = None
+    other_requirement: Optional[str] = None
+
 class ManualJobRequest(BaseModel):
     title: str
     company: str
     location: Optional[str] = None
     apply_link: Optional[str] = None
     posted_date: Optional[str] = None
+    vacancies: Optional[int] = None
+    fee: Optional[float] = None
+    job_description: Optional[str] = None
+    eligibility_criteria: Optional[EligibilityCriteria] = None
+    required_documents: Optional[List[str]] = None
+    application_deadline: Optional[str] = None
+    contract_or_permanent: Optional[str] = None  # 'contract' or 'permanent'
+    job_type: Optional[str] = None  # 'central', 'state', or 'psu'
+
+class JobUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
+    apply_link: Optional[str] = None
+    posted_date: Optional[str] = None
+    vacancies: Optional[int] = None
+    fee: Optional[float] = None
+    job_description: Optional[str] = None
+    eligibility_criteria: Optional[EligibilityCriteria] = None
+    required_documents: Optional[List[str]] = None
+    application_deadline: Optional[str] = None
+    contract_or_permanent: Optional[str] = None  # 'contract' or 'permanent'
+    job_type: Optional[str] = None  # 'central', 'state', or 'psu'
 
 
 @router.post("/discover")
@@ -155,13 +183,18 @@ def insert_manual_job(job: ManualJobRequest):
         
         logger.info(f"Inserting manual job: {job.title} at {job.company}")
         
-        # Prepare job data for insertion
+        # Prepare job data for insertion with all new fields
         job_data = {
             'title': job.title,
             'company': job.company,
             'location': job.location or '',
             'apply_link': job.apply_link or '',
             'posted_date': job.posted_date,
+            'vacancies': job.vacancies,
+            'fee': job.fee,
+            'job_description': job.job_description or '',
+            'eligibility_criteria': job.eligibility_criteria.dict() if job.eligibility_criteria else {},
+            'required_documents': job.required_documents or [],
             'source': 'manual'  # Tag with source = "manual"
         }
         
@@ -238,4 +271,205 @@ def get_jobs(
             "count": 0,
             "data": [],
             "message": f"Failed to fetch jobs: {str(e)}"
+        }
+
+
+@router.get("/{job_id}")
+def get_job_by_id(job_id: str):
+    """
+    Get a specific job by its job_id
+    
+    Path parameter:
+    - job_id: The unique job identifier (jobname_company_dateofposting format)
+    
+    Returns job details with all fields including eligibility criteria and required documents.
+    """
+    try:
+        logger.info(f"Fetching job with ID: {job_id}")
+        
+        job = postgresql_client.get_job_by_id(job_id)
+        
+        if job:
+            logger.info(f"Successfully retrieved job: {job['title']}")
+            return {
+                "status": "success",
+                "data": job
+            }
+        else:
+            logger.warning(f"Job not found with ID: {job_id}")
+            return {
+                "status": "error",
+                "message": f"Job not found with ID: {job_id}",
+                "data": None
+            }
+            
+    except Exception as e:
+        logger.error(f"Error fetching job {job_id}: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to fetch job: {str(e)}",
+            "data": None
+        }
+
+
+@router.put("/{job_id}")
+def update_job(job_id: str, job_update: JobUpdateRequest):
+    """
+    Update a job by its job_id
+    
+    Path parameter:
+    - job_id: The unique job identifier (jobname_company_dateofposting format)
+    
+    Request body: JobUpdateRequest with any fields to update
+    Only provided fields will be updated, others remain unchanged.
+    """
+    try:
+        logger.info(f"Updating job with ID: {job_id}")
+        
+        # Convert Pydantic model to dict, excluding None values
+        update_data = {}
+        for field, value in job_update.dict(exclude_unset=True).items():
+            if value is not None:
+                if field == 'eligibility_criteria' and isinstance(value, dict):
+                    update_data[field] = value
+                else:
+                    update_data[field] = value
+        
+        if not update_data:
+            return {
+                "status": "error",
+                "message": "No fields provided for update",
+                "data": None
+            }
+        
+        success = postgresql_client.update_job(job_id, update_data)
+        
+        if success:
+            # Fetch updated job to return
+            updated_job = postgresql_client.get_job_by_id(job_id)
+            logger.info(f"Successfully updated job: {job_id}")
+            return {
+                "status": "success",
+                "message": "Job updated successfully",
+                "data": updated_job
+            }
+        else:
+            logger.warning(f"Job not found for update with ID: {job_id}")
+            return {
+                "status": "error",
+                "message": f"Job not found with ID: {job_id}",
+                "data": None
+            }
+            
+    except Exception as e:
+        logger.error(f"Error updating job {job_id}: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to update job: {str(e)}",
+            "data": None
+        }
+
+
+@router.delete("/{job_id}")
+def delete_job(job_id: str):
+    """
+    Delete a job by its job_id
+    
+    Path parameter:
+    - job_id: The unique job identifier (jobname_company_dateofposting format)
+    
+    Permanently removes the job from the database.
+    """
+    try:
+        logger.info(f"Deleting job with ID: {job_id}")
+        
+        success = postgresql_client.delete_job(job_id)
+        
+        if success:
+            logger.info(f"Successfully deleted job: {job_id}")
+            return {
+                "status": "success",
+                "message": f"Job {job_id} deleted successfully"
+            }
+        else:
+            logger.warning(f"Job not found for deletion with ID: {job_id}")
+            return {
+                "status": "error",
+                "message": f"Job not found with ID: {job_id}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error deleting job {job_id}: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to delete job: {str(e)}"
+        }
+
+
+@router.get("/search/advanced")
+def search_jobs_advanced(
+    limit: int = Query(50, description="Maximum number of jobs to return"),
+    location: Optional[str] = Query(None, description="Filter by location (partial match)"),
+    company: Optional[str] = Query(None, description="Filter by company name (partial match)"),
+    source: Optional[str] = Query(None, description="Filter by job source (ai, manual, gemini_api)"),
+    min_vacancies: Optional[int] = Query(None, description="Minimum number of vacancies"),
+    max_fee: Optional[float] = Query(None, description="Maximum application fee"),
+    posted_after: Optional[str] = Query(None, description="Posted after date (YYYY-MM-DD)"),
+    search_term: Optional[str] = Query(None, description="Search in title and description")
+):
+    """
+    Advanced job search with multiple filters
+    
+    Query parameters support various filtering options:
+    - location: Partial match on job location
+    - company: Partial match on company name
+    - source: Exact match on job source
+    - min_vacancies: Jobs with at least this many vacancies
+    - max_fee: Jobs with application fee less than or equal to this amount
+    - posted_after: Jobs posted after this date
+    - search_term: Search in job title and description
+    
+    Returns filtered job results with all job details.
+    """
+    try:
+        logger.info(f"Advanced job search with filters: location={location}, company={company}, "
+                   f"source={source}, min_vacancies={min_vacancies}, max_fee={max_fee}, "
+                   f"posted_after={posted_after}, search_term={search_term}")
+        
+        # Prepare filter parameters
+        filters = {}
+        if location:
+            filters['location'] = location
+        if company:
+            filters['company'] = company
+        if source:
+            filters['source'] = source
+        if min_vacancies is not None:
+            filters['min_vacancies'] = min_vacancies
+        if max_fee is not None:
+            filters['max_fee'] = max_fee
+        if posted_after:
+            filters['posted_after'] = posted_after
+        if search_term:
+            filters['search_term'] = search_term
+        
+        # Get filtered jobs from database
+        jobs = postgresql_client.get_jobs_with_filters(limit=limit, **filters)
+        
+        logger.info(f"Advanced search retrieved {len(jobs)} jobs")
+        
+        return {
+            "status": "success",
+            "count": len(jobs),
+            "data": jobs,
+            "filters_applied": filters
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in advanced job search: {e}")
+        return {
+            "status": "error",
+            "count": 0,
+            "data": [],
+            "message": f"Advanced search failed: {str(e)}"
         }

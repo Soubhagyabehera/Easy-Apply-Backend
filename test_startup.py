@@ -63,7 +63,7 @@ def test_config():
         return False
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting EasyApply Backend Test...")
+    logger.info("🚀 Starting Applyze Backend Test...")
     
     # Test imports
     if not test_imports():

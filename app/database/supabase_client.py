@@ -3,6 +3,7 @@ PostgreSQL database client for job management using Supabase PostgreSQL connecti
 """
 import logging
 import os
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 from sqlalchemy import create_engine, text
@@ -51,19 +52,29 @@ class PostgreSQLClient:
             create_table_query = """
             CREATE TABLE IF NOT EXISTS jobs (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                job_id TEXT UNIQUE NOT NULL,
                 title TEXT NOT NULL,
                 company TEXT NOT NULL,
                 location TEXT,
                 apply_link TEXT,
                 posted_date DATE,
-                source TEXT DEFAULT 'gemini_api',
+                vacancies INTEGER,
+                fee DECIMAL(10,2),
+                job_description TEXT,
+                eligibility_criteria JSONB,
+                required_documents TEXT[],
+                source TEXT DEFAULT 'manual',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE(title, company, posted_date)
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
             
             CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs(company);
             CREATE INDEX IF NOT EXISTS idx_jobs_posted_date ON jobs(posted_date);
-            CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_jobs_location ON jobs(location);
+            CREATE INDEX IF NOT EXISTS idx_jobs_vacancies ON jobs(vacancies);
+            CREATE INDEX IF NOT EXISTS idx_jobs_source ON jobs(source);
+            CREATE INDEX IF NOT EXISTS idx_jobs_job_id ON jobs(job_id);
+            CREATE INDEX IF NOT EXISTS idx_jobs_eligibility ON jobs USING GIN(eligibility_criteria);
             """
             
             with self.engine.connect() as conn:
@@ -76,6 +87,17 @@ class PostgreSQLClient:
         except Exception as e:
             logger.error(f"Error ensuring jobs table exists: {e}")
             return False
+    
+    def _generate_job_id(self, title: str, company: str, posted_date: str) -> str:
+        """
+        Generate composite primary key: jobname_company_dateofposting
+        """
+        # Clean and format the components
+        clean_title = ''.join(c for c in title if c.isalnum() or c in ' -_').strip().replace(' ', '_')
+        clean_company = ''.join(c for c in company if c.isalnum() or c in ' -_').strip().replace(' ', '_')
+        clean_date = posted_date.replace('-', '') if posted_date else 'unknown'
+        
+        return f"{clean_title}_{clean_company}_{clean_date}".lower()
     
     def insert_jobs(self, jobs: List[Dict[str, Any]]) -> int:
         """
@@ -95,13 +117,35 @@ class PostgreSQLClient:
             # Prepare jobs data for insertion
             jobs_to_insert = []
             for job in jobs:
+                posted_date_str = self._parse_date(job.get('posted_date') or job.get('apply_last_date'))
+                
+                # Properly serialize complex data types for PostgreSQL
+                eligibility_criteria = job.get('eligibility_criteria', {})
+                required_documents = job.get('required_documents', [])
+                
+                # Parse application deadline
+                application_deadline_str = self._parse_date(job.get('application_deadline'))
+                
                 job_data = {
+                    'job_id': self._generate_job_id(
+                        job.get('title', ''),
+                        job.get('company', '') or job.get('organization', ''),
+                        posted_date_str or ''
+                    ),
                     'title': job.get('title', ''),
-                    'company': job.get('company', ''),  # Map organization to company
+                    'company': job.get('company', '') or job.get('organization', ''),
                     'location': job.get('location', ''),
                     'apply_link': job.get('apply_link', ''),
-                    'posted_date': self._parse_date(job.get('apply_last_date')),
-                    'source': 'gemini_api'
+                    'posted_date': posted_date_str,
+                    'vacancies': job.get('vacancies'),
+                    'fee': job.get('fee'),
+                    'job_description': job.get('job_description', ''),
+                    'eligibility_criteria': json.dumps(eligibility_criteria) if eligibility_criteria else '{}',
+                    'required_documents': required_documents if isinstance(required_documents, list) else [],
+                    'application_deadline': application_deadline_str,
+                    'contract_or_permanent': job.get('contract_or_permanent'),
+                    'job_type': job.get('job_type'),
+                    'source': job.get('source', 'manual')
                 }
                 
                 # Only add if we have required fields
@@ -116,9 +160,15 @@ class PostgreSQLClient:
             inserted_count = 0
             
             insert_query = """
-            INSERT INTO jobs (title, company, location, apply_link, posted_date, source)
-            VALUES (:title, :company, :location, :apply_link, :posted_date, :source)
-            ON CONFLICT (title, company, posted_date) DO NOTHING
+            INSERT INTO jobs (job_id, title, company, location, apply_link, posted_date, 
+                            vacancies, fee, job_description, eligibility_criteria, 
+                            required_documents, application_deadline, contract_or_permanent, 
+                            job_type, source)
+            VALUES (:job_id, :title, :company, :location, :apply_link, :posted_date,
+                   :vacancies, :fee, :job_description, :eligibility_criteria,
+                   :required_documents, :application_deadline, :contract_or_permanent,
+                   :job_type, :source)
+            ON CONFLICT (job_id) DO NOTHING
             """
             
             with self.engine.connect() as conn:
@@ -152,7 +202,8 @@ class PostgreSQLClient:
             logger.info(f"Fetching up to {limit} jobs from database")
             
             select_query = """
-            SELECT id, title, company, location, apply_link, posted_date, source, created_at
+            SELECT id, job_id, title, company, location, apply_link, posted_date, vacancies, fee, 
+                   job_description, eligibility_criteria, required_documents, source, created_at
             FROM jobs
             ORDER BY posted_date DESC, created_at DESC
             LIMIT :limit
@@ -214,7 +265,9 @@ class PostgreSQLClient:
             logger.info(f"Fetching up to {limit} jobs from database with source filter: {source}")
             
             select_query = """
-            SELECT id, title, company, location, apply_link, posted_date, source, created_at
+            SELECT id, job_id, title, company, location, apply_link, posted_date, vacancies, fee, 
+                   job_description, eligibility_criteria, required_documents, application_deadline,
+                   contract_or_permanent, job_type, source, created_at
             FROM jobs
             WHERE source = :source
             ORDER BY posted_date DESC, created_at DESC
@@ -230,13 +283,32 @@ class PostgreSQLClient:
                 # Convert to the format expected by frontend
                 formatted_jobs = []
                 for row in rows:
+                    # Properly deserialize JSON data from database
+                    eligibility_criteria = {}
+                    if row.eligibility_criteria:
+                        try:
+                            if isinstance(row.eligibility_criteria, str):
+                                eligibility_criteria = json.loads(row.eligibility_criteria)
+                            else:
+                                eligibility_criteria = row.eligibility_criteria
+                        except (json.JSONDecodeError, TypeError):
+                            eligibility_criteria = {}
+                    
                     formatted_job = {
-                        'id': str(row.id),
+                        'id': str(row.id),  # UUID for backward compatibility
+                        'job_id': row.job_id,  # Composite key
                         'title': row.title,
-                        'organization': row.company,  # Map company back to organization
+                        'company': row.company,
+                        'organization': row.company,  # Map company to organization for backward compatibility
                         'location': row.location,
                         'apply_link': row.apply_link,
-                        'apply_last_date': str(row.posted_date) if row.posted_date else None,
+                        'posted_date': str(row.posted_date) if row.posted_date else None,
+                        'apply_last_date': str(row.posted_date) if row.posted_date else None,  # Backward compatibility
+                        'vacancies': row.vacancies,
+                        'fee': float(row.fee) if row.fee else None,
+                        'job_description': row.job_description,
+                        'eligibility_criteria': eligibility_criteria,
+                        'required_documents': list(row.required_documents) if row.required_documents else [],
                         'source': row.source,
                         'created_at': str(row.created_at) if row.created_at else None
                     }
@@ -246,6 +318,71 @@ class PostgreSQLClient:
             
         except Exception as e:
             logger.error(f"Error fetching jobs by source: {e}")
+            return []
+    
+    def get_all_jobs(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Fetch all jobs from the database without source filtering
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Returning empty job list.")
+                return []
+                
+            logger.info(f"Fetching up to {limit} jobs from database")
+            
+            select_query = """
+            SELECT id, job_id, title, company, location, apply_link, posted_date, vacancies, fee, 
+                   job_description, eligibility_criteria, required_documents, source, created_at
+            FROM jobs
+            ORDER BY posted_date DESC, created_at DESC
+            LIMIT :limit
+            """
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(text(select_query), {'limit': limit})
+                rows = result.fetchall()
+                
+                logger.info(f"Retrieved {len(rows)} jobs from database")
+                
+                # Convert to the format expected by frontend
+                formatted_jobs = []
+                for row in rows:
+                    # Properly deserialize JSON data from database
+                    eligibility_criteria = {}
+                    if row.eligibility_criteria:
+                        try:
+                            if isinstance(row.eligibility_criteria, str):
+                                eligibility_criteria = json.loads(row.eligibility_criteria)
+                            else:
+                                eligibility_criteria = row.eligibility_criteria
+                        except (json.JSONDecodeError, TypeError):
+                            eligibility_criteria = {}
+                    
+                    formatted_job = {
+                        'id': str(row.id),  # UUID for backward compatibility
+                        'job_id': row.job_id,  # Composite key
+                        'title': row.title,
+                        'company': row.company,
+                        'organization': row.company,  # Map company to organization for backward compatibility
+                        'location': row.location,
+                        'apply_link': row.apply_link,
+                        'posted_date': str(row.posted_date) if row.posted_date else None,
+                        'apply_last_date': str(row.posted_date) if row.posted_date else None,  # Backward compatibility
+                        'vacancies': row.vacancies,
+                        'fee': float(row.fee) if row.fee else None,
+                        'job_description': row.job_description,
+                        'eligibility_criteria': eligibility_criteria,
+                        'required_documents': list(row.required_documents) if row.required_documents else [],
+                        'source': row.source,
+                        'created_at': str(row.created_at) if row.created_at else None
+                    }
+                    formatted_jobs.append(formatted_job)
+                
+                return formatted_jobs
+            
+        except Exception as e:
+            logger.error(f"Error fetching all jobs: {e}")
             return []
     
     def _parse_date(self, date_str: str) -> Optional[str]:
@@ -475,6 +612,241 @@ class PostgreSQLClient:
         except Exception as e:
             logger.error(f"Error getting user by email: {e}")
             return None
+
+    def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific job by its job_id
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Cannot get job.")
+                return None
+                
+            select_query = """
+            SELECT job_id, title, company, location, apply_link, posted_date, vacancies, fee, 
+                   job_description, eligibility_criteria, required_documents, source, created_at, updated_at
+            FROM jobs 
+            WHERE job_id = :job_id
+            """
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(text(select_query), {'job_id': job_id})
+                row = result.fetchone()
+                
+                if row:
+                    # Properly deserialize JSON data from database
+                    eligibility_criteria = {}
+                    if row.eligibility_criteria:
+                        try:
+                            if isinstance(row.eligibility_criteria, str):
+                                eligibility_criteria = json.loads(row.eligibility_criteria)
+                            else:
+                                eligibility_criteria = row.eligibility_criteria
+                        except (json.JSONDecodeError, TypeError):
+                            eligibility_criteria = {}
+                    
+                    return {
+                        'job_id': row.job_id,
+                        'title': row.title,
+                        'company': row.company,
+                        'organization': row.company,  # Backward compatibility
+                        'location': row.location,
+                        'apply_link': row.apply_link,
+                        'posted_date': str(row.posted_date) if row.posted_date else None,
+                        'apply_last_date': str(row.posted_date) if row.posted_date else None,  # Backward compatibility
+                        'vacancies': row.vacancies,
+                        'fee': float(row.fee) if row.fee else None,
+                        'job_description': row.job_description,
+                        'eligibility_criteria': eligibility_criteria,
+                        'required_documents': list(row.required_documents) if row.required_documents else [],
+                        'source': row.source,
+                        'created_at': str(row.created_at) if row.created_at else None,
+                        'updated_at': str(row.updated_at) if row.updated_at else None
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting job by ID: {e}")
+            return None
+
+    def update_job(self, job_id: str, job_data: Dict[str, Any]) -> bool:
+        """
+        Update a job by its job_id
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Cannot update job.")
+                return False
+                
+            # Build dynamic update query based on provided fields
+            update_fields = []
+            params = {'job_id': job_id}
+            
+            for field in ['title', 'company', 'location', 'apply_link', 'posted_date', 
+                         'vacancies', 'fee', 'job_description', 'eligibility_criteria', 
+                         'required_documents', 'source']:
+                if field in job_data:
+                    update_fields.append(f"{field} = :{field}")
+                    # Serialize complex data types for PostgreSQL
+                    if field == 'eligibility_criteria':
+                        params[field] = json.dumps(job_data[field]) if job_data[field] else '{}'
+                    elif field == 'required_documents':
+                        params[field] = job_data[field] if isinstance(job_data[field], list) else []
+                    else:
+                        params[field] = job_data[field]
+            
+            if not update_fields:
+                logger.warning("No fields to update")
+                return False
+            
+            # Add updated_at timestamp
+            update_fields.append("updated_at = NOW()")
+            
+            update_query = f"""
+            UPDATE jobs 
+            SET {', '.join(update_fields)}
+            WHERE job_id = :job_id
+            """
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(text(update_query), params)
+                conn.commit()
+                
+                if result.rowcount > 0:
+                    logger.info(f"Successfully updated job {job_id}")
+                    return True
+                else:
+                    logger.warning(f"No job found with ID {job_id}")
+                    return False
+                
+        except Exception as e:
+            logger.error(f"Error updating job {job_id}: {e}")
+            return False
+
+    def delete_job(self, job_id: str) -> bool:
+        """
+        Delete a job by its job_id
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Cannot delete job.")
+                return False
+                
+            delete_query = "DELETE FROM jobs WHERE job_id = :job_id"
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(text(delete_query), {'job_id': job_id})
+                conn.commit()
+                
+                if result.rowcount > 0:
+                    logger.info(f"Successfully deleted job {job_id}")
+                    return True
+                else:
+                    logger.warning(f"No job found with ID {job_id}")
+                    return False
+                
+        except Exception as e:
+            logger.error(f"Error deleting job {job_id}: {e}")
+            return False
+
+    def get_jobs_with_filters(self, limit: int = 100, **filters) -> List[Dict[str, Any]]:
+        """
+        Fetch jobs with advanced filtering options
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Returning empty job list.")
+                return []
+                
+            # Build dynamic WHERE clause based on filters
+            where_conditions = []
+            params = {'limit': limit}
+            
+            # Handle different filter types
+            if filters.get('location'):
+                where_conditions.append("location ILIKE :location")
+                params['location'] = f"%{filters['location']}%"
+            
+            if filters.get('company'):
+                where_conditions.append("company ILIKE :company")
+                params['company'] = f"%{filters['company']}%"
+            
+            if filters.get('source'):
+                where_conditions.append("source = :source")
+                params['source'] = filters['source']
+            
+            if filters.get('min_vacancies'):
+                where_conditions.append("vacancies >= :min_vacancies")
+                params['min_vacancies'] = filters['min_vacancies']
+            
+            if filters.get('max_fee'):
+                where_conditions.append("(fee IS NULL OR fee <= :max_fee)")
+                params['max_fee'] = filters['max_fee']
+            
+            if filters.get('posted_after'):
+                where_conditions.append("posted_date >= :posted_after")
+                params['posted_after'] = filters['posted_after']
+            
+            if filters.get('search_term'):
+                where_conditions.append("(title ILIKE :search_term OR job_description ILIKE :search_term)")
+                params['search_term'] = f"%{filters['search_term']}%"
+            
+            # Build the complete query
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            select_query = f"""
+            SELECT job_id, title, company, location, apply_link, posted_date, vacancies, fee, 
+                   job_description, eligibility_criteria, required_documents, source, created_at
+            FROM jobs
+            WHERE {where_clause}
+            ORDER BY posted_date DESC, created_at DESC
+            LIMIT :limit
+            """
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(text(select_query), params)
+                rows = result.fetchall()
+                
+                logger.info(f"Retrieved {len(rows)} jobs with filters: {filters}")
+                
+                # Convert to the format expected by frontend
+                formatted_jobs = []
+                for row in rows:
+                    # Properly deserialize JSON data from database
+                    eligibility_criteria = {}
+                    if row.eligibility_criteria:
+                        try:
+                            if isinstance(row.eligibility_criteria, str):
+                                eligibility_criteria = json.loads(row.eligibility_criteria)
+                            else:
+                                eligibility_criteria = row.eligibility_criteria
+                        except (json.JSONDecodeError, TypeError):
+                            eligibility_criteria = {}
+                    
+                    formatted_job = {
+                        'job_id': row.job_id,
+                        'title': row.title,
+                        'company': row.company,
+                        'organization': row.company,  # Backward compatibility
+                        'location': row.location,
+                        'apply_link': row.apply_link,
+                        'posted_date': str(row.posted_date) if row.posted_date else None,
+                        'apply_last_date': str(row.posted_date) if row.posted_date else None,  # Backward compatibility
+                        'vacancies': row.vacancies,
+                        'fee': float(row.fee) if row.fee else None,
+                        'job_description': row.job_description,
+                        'eligibility_criteria': eligibility_criteria,
+                        'required_documents': list(row.required_documents) if row.required_documents else [],
+                        'source': row.source,
+                        'created_at': str(row.created_at) if row.created_at else None
+                    }
+                    formatted_jobs.append(formatted_job)
+                
+                return formatted_jobs
+            
+        except Exception as e:
+            logger.error(f"Error fetching jobs with filters: {e}")
+            return []
 
 # Global instance
 postgresql_client = PostgreSQLClient()
