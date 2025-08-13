@@ -848,5 +848,812 @@ class PostgreSQLClient:
             logger.error(f"Error fetching jobs with filters: {e}")
             return []
 
+    def ensure_photo_editor_tables_exist(self):
+        """
+        Check if photo editor tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping photo editor table creation.")
+                return False
+                
+            logger.info("Checking if photo editor tables exist...")
+            
+            # Photo Processing History Table
+            create_history_table_sql = """
+            CREATE TABLE IF NOT EXISTS photo_processing_history (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Original file information
+                original_filename TEXT NOT NULL,
+                original_size_bytes INTEGER NOT NULL,
+                original_width INTEGER NOT NULL,
+                original_height INTEGER NOT NULL,
+                original_format TEXT NOT NULL,
+                
+                -- Processing parameters
+                target_width INTEGER NOT NULL,
+                target_height INTEGER NOT NULL,
+                output_format TEXT NOT NULL CHECK (output_format IN ('JPG', 'PNG', 'PDF')),
+                background_color TEXT,
+                maintain_aspect_ratio BOOLEAN DEFAULT FALSE,
+                max_file_size_kb INTEGER,
+                
+                -- Output file information
+                processed_filename TEXT NOT NULL,
+                processed_size_bytes INTEGER NOT NULL,
+                processed_width INTEGER NOT NULL,
+                processed_height INTEGER NOT NULL,
+                compression_ratio DECIMAL(5,2),
+                
+                -- Processing metadata
+                processing_time_ms INTEGER,
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- File storage information
+                file_id TEXT UNIQUE NOT NULL,
+                storage_path TEXT,
+                thumbnail_path TEXT,
+                download_count INTEGER DEFAULT 0,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE,
+                last_accessed TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Photo Processing Batches Table
+            create_batches_table_sql = """
+            CREATE TABLE IF NOT EXISTS photo_processing_batches (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                batch_id TEXT UNIQUE NOT NULL,
+                total_files INTEGER NOT NULL,
+                successful_files INTEGER DEFAULT 0,
+                failed_files INTEGER DEFAULT 0,
+                
+                -- Processing parameters (same for all files in batch)
+                target_width INTEGER NOT NULL,
+                target_height INTEGER NOT NULL,
+                output_format TEXT NOT NULL CHECK (output_format IN ('JPG', 'PNG', 'PDF')),
+                background_color TEXT,
+                maintain_aspect_ratio BOOLEAN DEFAULT FALSE,
+                max_file_size_kb INTEGER,
+                
+                -- Batch metadata
+                total_processing_time_ms INTEGER,
+                zip_file_path TEXT,
+                zip_file_size_bytes INTEGER,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                completed_at TIMESTAMP WITH TIME ZONE,
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Photo Editor Settings Table
+            create_settings_table_sql = """
+            CREATE TABLE IF NOT EXISTS photo_editor_settings (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT UNIQUE NOT NULL,
+                
+                -- Default processing preferences
+                default_width INTEGER DEFAULT 200,
+                default_height INTEGER DEFAULT 200,
+                default_output_format TEXT DEFAULT 'JPG' CHECK (default_output_format IN ('JPG', 'PNG', 'PDF')),
+                default_background_color TEXT DEFAULT '#ffffff',
+                default_maintain_aspect_ratio BOOLEAN DEFAULT FALSE,
+                default_max_file_size_kb INTEGER,
+                
+                -- User preferences
+                auto_optimize_size BOOLEAN DEFAULT TRUE,
+                preferred_quality INTEGER DEFAULT 95 CHECK (preferred_quality BETWEEN 1 AND 100),
+                save_processing_history BOOLEAN DEFAULT TRUE,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+            """
+            
+            # Create indexes
+            create_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_photo_history_user_id ON photo_processing_history(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_history_session_id ON photo_processing_history(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_history_file_id ON photo_processing_history(file_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_history_created_at ON photo_processing_history(created_at);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_batches_user_id ON photo_processing_batches(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_batches_session_id ON photo_processing_batches(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_batches_batch_id ON photo_processing_batches(batch_id);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_batches_created_at ON photo_processing_batches(created_at);",
+                "CREATE INDEX IF NOT EXISTS idx_photo_settings_user_id ON photo_editor_settings(user_id);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create tables
+                connection.execute(text(create_history_table_sql))
+                connection.execute(text(create_batches_table_sql))
+                connection.execute(text(create_settings_table_sql))
+                
+                # Create indexes
+                for index_sql in create_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("Photo editor tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create photo editor tables: {e}")
+            return False
+    
+    def save_photo_processing_history(self, processing_data: Dict[str, Any]) -> Optional[str]:
+        """Save photo processing history to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO photo_processing_history (
+                user_id, session_id, original_filename, original_size_bytes,
+                original_width, original_height, original_format, target_width,
+                target_height, output_format, background_color, maintain_aspect_ratio,
+                max_file_size_kb, processed_filename, processed_size_bytes,
+                processed_width, processed_height, compression_ratio, processing_time_ms,
+                success, error_message, file_id, storage_path, thumbnail_path
+            ) VALUES (
+                :user_id, :session_id, :original_filename, :original_size_bytes,
+                :original_width, :original_height, :original_format, :target_width,
+                :target_height, :output_format, :background_color, :maintain_aspect_ratio,
+                :max_file_size_kb, :processed_filename, :processed_size_bytes,
+                :processed_width, :processed_height, :compression_ratio, :processing_time_ms,
+                :success, :error_message, :file_id, :storage_path, :thumbnail_path
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), processing_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Photo processing history saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save photo processing history: {e}")
+            return None
+    
+    def save_photo_processing_batch(self, batch_data: Dict[str, Any]) -> Optional[str]:
+        """Save photo processing batch to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO photo_processing_batches (
+                user_id, session_id, batch_id, total_files, successful_files,
+                failed_files, target_width, target_height, output_format,
+                background_color, maintain_aspect_ratio, max_file_size_kb,
+                total_processing_time_ms, zip_file_path, zip_file_size_bytes
+            ) VALUES (
+                :user_id, :session_id, :batch_id, :total_files, :successful_files,
+                :failed_files, :target_width, :target_height, :output_format,
+                :background_color, :maintain_aspect_ratio, :max_file_size_kb,
+                :total_processing_time_ms, :zip_file_path, :zip_file_size_bytes
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), batch_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Photo processing batch saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save photo processing batch: {e}")
+            return None
+    
+    def ensure_pdf_tools_tables_exist(self):
+        """
+        Check if PDF tools tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping PDF tools table creation.")
+                return False
+                
+            logger.info("Checking if PDF tools tables exist...")
+            
+            # PDF Processing History Table
+            create_pdf_history_table_sql = """
+            CREATE TABLE IF NOT EXISTS pdf_processing_history (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Operation details
+                operation_type TEXT NOT NULL CHECK (operation_type IN ('merge', 'split', 'compress', 'extract', 'convert')),
+                input_files INTEGER NOT NULL,
+                total_input_size BIGINT NOT NULL,
+                output_size BIGINT,
+                total_pages INTEGER,
+                compression_ratio DECIMAL(5,2),
+                compression_level TEXT,
+                
+                -- Processing metadata
+                processing_time_ms INTEGER,
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- File storage information
+                file_id TEXT UNIQUE NOT NULL,
+                storage_path TEXT,
+                original_filenames TEXT[],
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # PDF Batch Processing Table
+            create_pdf_batch_table_sql = """
+            CREATE TABLE IF NOT EXISTS pdf_batch_processing (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                batch_id TEXT UNIQUE NOT NULL,
+                operation_type TEXT NOT NULL,
+                input_files INTEGER NOT NULL,
+                output_files INTEGER NOT NULL,
+                total_input_size BIGINT NOT NULL,
+                total_output_size BIGINT,
+                total_pages INTEGER,
+                
+                -- Processing metadata
+                processing_time_ms INTEGER,
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                original_filename TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                completed_at TIMESTAMP WITH TIME ZONE,
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Create indexes
+            create_pdf_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_pdf_history_user_id ON pdf_processing_history(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_history_session_id ON pdf_processing_history(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_history_file_id ON pdf_processing_history(file_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_history_operation ON pdf_processing_history(operation_type);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_history_created_at ON pdf_processing_history(created_at);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_batch_user_id ON pdf_batch_processing(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_batch_session_id ON pdf_batch_processing(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_batch_batch_id ON pdf_batch_processing(batch_id);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_batch_operation ON pdf_batch_processing(operation_type);",
+                "CREATE INDEX IF NOT EXISTS idx_pdf_batch_created_at ON pdf_batch_processing(created_at);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create tables
+                connection.execute(text(create_pdf_history_table_sql))
+                connection.execute(text(create_pdf_batch_table_sql))
+                
+                # Create indexes
+                for index_sql in create_pdf_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("PDF tools tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create PDF tools tables: {e}")
+            return False
+    
+    def save_pdf_processing_history(self, processing_data: Dict[str, Any]) -> Optional[str]:
+        """Save PDF processing history to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO pdf_processing_history (
+                user_id, session_id, operation_type, input_files, total_input_size,
+                output_size, total_pages, compression_ratio, compression_level,
+                processing_time_ms, success, error_message, file_id, storage_path,
+                original_filenames
+            ) VALUES (
+                :user_id, :session_id, :operation_type, :input_files, :total_input_size,
+                :output_size, :total_pages, :compression_ratio, :compression_level,
+                :processing_time_ms, :success, :error_message, :file_id, :storage_path,
+                :original_filenames
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), processing_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"PDF processing history saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save PDF processing history: {e}")
+            return None
+    
+    def save_pdf_batch_processing(self, batch_data: Dict[str, Any]) -> Optional[str]:
+        """Save PDF batch processing to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO pdf_batch_processing (
+                user_id, session_id, batch_id, operation_type, input_files,
+                output_files, total_input_size, total_output_size, total_pages,
+                processing_time_ms, success, error_message, original_filename
+            ) VALUES (
+                :user_id, :session_id, :batch_id, :operation_type, :input_files,
+                :output_files, :total_input_size, :total_output_size, :total_pages,
+                :processing_time_ms, :success, :error_message, :original_filename
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), batch_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"PDF batch processing saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save PDF batch processing: {e}")
+            return None
+    
+    def ensure_signature_tables_exist(self):
+        """
+        Check if signature creator tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping signature tables creation.")
+                return False
+                
+            logger.info("Checking if signature creator tables exist...")
+            
+            # Signature Data Table
+            create_signature_table_sql = """
+            CREATE TABLE IF NOT EXISTS signature_data (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Signature details
+                signature_id TEXT UNIQUE NOT NULL,
+                signature_type TEXT NOT NULL CHECK (signature_type IN ('text', 'drawn', 'uploaded')),
+                signature_text TEXT,
+                original_filename TEXT,
+                
+                -- Style settings
+                font_style TEXT,
+                font_size INTEGER,
+                signature_size TEXT CHECK (signature_size IN ('small', 'medium', 'large')),
+                color TEXT,
+                background_transparent BOOLEAN DEFAULT TRUE,
+                
+                -- File information
+                file_size BIGINT NOT NULL,
+                processing_time_ms INTEGER,
+                storage_path TEXT NOT NULL,
+                thumbnail_path TEXT,
+                
+                -- Status
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Create indexes
+            create_signature_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_signature_user_id ON signature_data(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_signature_session_id ON signature_data(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_signature_signature_id ON signature_data(signature_id);",
+                "CREATE INDEX IF NOT EXISTS idx_signature_type ON signature_data(signature_type);",
+                "CREATE INDEX IF NOT EXISTS idx_signature_created_at ON signature_data(created_at);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create table
+                connection.execute(text(create_signature_table_sql))
+                
+                # Create indexes
+                for index_sql in create_signature_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("Signature creator tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create signature creator tables: {e}")
+            return False
+    
+    def save_signature_data(self, signature_data: Dict[str, Any]) -> Optional[str]:
+        """Save signature data to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO signature_data (
+                user_id, session_id, signature_id, signature_type, signature_text,
+                original_filename, font_style, font_size, signature_size, color,
+                background_transparent, file_size, processing_time_ms, storage_path,
+                thumbnail_path, success, error_message
+            ) VALUES (
+                :user_id, :session_id, :signature_id, :signature_type, :signature_text,
+                :original_filename, :font_style, :font_size, :signature_size, :color,
+                :background_transparent, :file_size, :processing_time_ms, :storage_path,
+                :thumbnail_path, :success, :error_message
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), signature_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Signature data saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save signature data: {e}")
+            return None
+    
+    def ensure_scanner_tables_exist(self):
+        """
+        Check if document scanner tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping scanner tables creation.")
+                return False
+                
+            logger.info("Checking if document scanner tables exist...")
+            
+            # Document Scanner Data Table
+            create_scanner_table_sql = """
+            CREATE TABLE IF NOT EXISTS document_scanner_data (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Scan details
+                scan_id TEXT UNIQUE NOT NULL,
+                input_files INTEGER NOT NULL,
+                output_format TEXT NOT NULL CHECK (output_format IN ('PDF', 'PNG', 'JPG')),
+                enhancement_level TEXT CHECK (enhancement_level IN ('light', 'medium', 'high')),
+                auto_crop BOOLEAN DEFAULT TRUE,
+                page_size TEXT CHECK (page_size IN ('A4', 'Letter')),
+                
+                -- File information
+                total_input_size BIGINT NOT NULL,
+                output_size BIGINT NOT NULL,
+                processing_time_ms INTEGER,
+                storage_path TEXT NOT NULL,
+                original_filenames TEXT[],
+                
+                -- Status
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Create indexes
+            create_scanner_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_scanner_user_id ON document_scanner_data(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_scanner_session_id ON document_scanner_data(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_scanner_scan_id ON document_scanner_data(scan_id);",
+                "CREATE INDEX IF NOT EXISTS idx_scanner_output_format ON document_scanner_data(output_format);",
+                "CREATE INDEX IF NOT EXISTS idx_scanner_created_at ON document_scanner_data(created_at);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create table
+                connection.execute(text(create_scanner_table_sql))
+                
+                # Create indexes
+                for index_sql in create_scanner_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("Document scanner tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create document scanner tables: {e}")
+            return False
+    
+    def save_scan_data(self, scan_data: Dict[str, Any]) -> Optional[str]:
+        """Save document scan data to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO document_scanner_data (
+                user_id, session_id, scan_id, input_files, output_format,
+                enhancement_level, auto_crop, page_size, total_input_size,
+                output_size, processing_time_ms, storage_path, original_filenames,
+                success, error_message
+            ) VALUES (
+                :user_id, :session_id, :scan_id, :input_files, :output_format,
+                :enhancement_level, :auto_crop, :page_size, :total_input_size,
+                :output_size, :processing_time_ms, :storage_path, :original_filenames,
+                :success, :error_message
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), scan_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Document scan data saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save document scan data: {e}")
+            return None
+    
+    def ensure_converter_tables_exist(self):
+        """
+        Check if format converter tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping converter tables creation.")
+                return False
+                
+            logger.info("Checking if format converter tables exist...")
+            
+            # Format Converter Data Table
+            create_converter_table_sql = """
+            CREATE TABLE IF NOT EXISTS format_converter_data (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Conversion details
+                conversion_id TEXT UNIQUE NOT NULL,
+                conversion_type TEXT NOT NULL CHECK (conversion_type IN ('pdf_to_images', 'images_to_pdf', 'document_format')),
+                input_format TEXT NOT NULL,
+                output_format TEXT NOT NULL,
+                input_files INTEGER NOT NULL,
+                output_files INTEGER NOT NULL,
+                
+                -- File information
+                total_input_size BIGINT NOT NULL,
+                total_output_size BIGINT NOT NULL,
+                processing_time_ms INTEGER,
+                original_filename TEXT,
+                original_filenames TEXT[],
+                
+                -- Conversion settings
+                dpi INTEGER,
+                quality INTEGER,
+                page_size TEXT,
+                
+                -- Status
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Create indexes
+            create_converter_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_converter_user_id ON format_converter_data(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_session_id ON format_converter_data(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_conversion_id ON format_converter_data(conversion_id);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_type ON format_converter_data(conversion_type);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_input_format ON format_converter_data(input_format);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_output_format ON format_converter_data(output_format);",
+                "CREATE INDEX IF NOT EXISTS idx_converter_created_at ON format_converter_data(created_at);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create table
+                connection.execute(text(create_converter_table_sql))
+                
+                # Create indexes
+                for index_sql in create_converter_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("Format converter tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create format converter tables: {e}")
+            return False
+    
+    def save_conversion_data(self, conversion_data: Dict[str, Any]) -> Optional[str]:
+        """Save format conversion data to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO format_converter_data (
+                user_id, session_id, conversion_id, conversion_type, input_format,
+                output_format, input_files, output_files, total_input_size,
+                total_output_size, processing_time_ms, original_filename,
+                original_filenames, dpi, quality, page_size, success, error_message
+            ) VALUES (
+                :user_id, :session_id, :conversion_id, :conversion_type, :input_format,
+                :output_format, :input_files, :output_files, :total_input_size,
+                :total_output_size, :processing_time_ms, :original_filename,
+                :original_filenames, :dpi, :quality, :page_size, :success, :error_message
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), conversion_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Format conversion data saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save format conversion data: {e}")
+            return None
+    
+    def ensure_optimizer_tables_exist(self):
+        """
+        Check if size optimizer tables exist, create them if they don't
+        """
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized. Skipping optimizer tables creation.")
+                return False
+                
+            logger.info("Checking if size optimizer tables exist...")
+            
+            # Size Optimizer Data Table
+            create_optimizer_table_sql = """
+            CREATE TABLE IF NOT EXISTS size_optimizer_data (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                session_id TEXT NOT NULL,
+                
+                -- Optimization details
+                optimization_id TEXT UNIQUE NOT NULL,
+                file_type TEXT NOT NULL CHECK (file_type IN ('image', 'pdf')),
+                original_format TEXT NOT NULL,
+                output_format TEXT NOT NULL,
+                compression_level TEXT CHECK (compression_level IN ('light', 'medium', 'aggressive')),
+                
+                -- Optimization settings
+                target_size_kb INTEGER,
+                max_width INTEGER,
+                max_height INTEGER,
+                remove_metadata BOOLEAN DEFAULT FALSE,
+                remove_annotations BOOLEAN DEFAULT FALSE,
+                final_quality INTEGER,
+                
+                -- File information
+                original_size BIGINT NOT NULL,
+                optimized_size BIGINT NOT NULL,
+                compression_ratio DECIMAL(5,2),
+                total_pages INTEGER,
+                processing_time_ms INTEGER,
+                storage_path TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                
+                -- Status
+                success BOOLEAN DEFAULT TRUE,
+                error_message TEXT,
+                
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            
+            # Create indexes
+            create_optimizer_indexes_sql = [
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_user_id ON size_optimizer_data(user_id);",
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_session_id ON size_optimizer_data(session_id);",
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_optimization_id ON size_optimizer_data(optimization_id);",
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_file_type ON size_optimizer_data(file_type);",
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_compression_level ON size_optimizer_data(compression_level);",
+                "CREATE INDEX IF NOT EXISTS idx_optimizer_created_at ON size_optimizer_data(created_at);"
+            ]
+            
+            with self.engine.connect() as connection:
+                # Create table
+                connection.execute(text(create_optimizer_table_sql))
+                
+                # Create indexes
+                for index_sql in create_optimizer_indexes_sql:
+                    connection.execute(text(index_sql))
+                
+                connection.commit()
+                
+            logger.info("Size optimizer tables created/verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to create size optimizer tables: {e}")
+            return False
+    
+    def save_optimization_data(self, optimization_data: Dict[str, Any]) -> Optional[str]:
+        """Save size optimization data to database"""
+        try:
+            if self.engine is None:
+                logger.warning("PostgreSQL client not initialized")
+                return None
+            
+            insert_sql = """
+            INSERT INTO size_optimizer_data (
+                user_id, session_id, optimization_id, file_type, original_format,
+                output_format, compression_level, target_size_kb, max_width,
+                max_height, remove_metadata, remove_annotations, final_quality,
+                original_size, optimized_size, compression_ratio, total_pages,
+                processing_time_ms, storage_path, original_filename, success, error_message
+            ) VALUES (
+                :user_id, :session_id, :optimization_id, :file_type, :original_format,
+                :output_format, :compression_level, :target_size_kb, :max_width,
+                :max_height, :remove_metadata, :remove_annotations, :final_quality,
+                :original_size, :optimized_size, :compression_ratio, :total_pages,
+                :processing_time_ms, :storage_path, :original_filename, :success, :error_message
+            ) RETURNING id;
+            """
+            
+            with self.engine.connect() as connection:
+                result = connection.execute(text(insert_sql), optimization_data)
+                connection.commit()
+                record_id = result.fetchone()[0]
+                logger.info(f"Size optimization data saved with ID: {record_id}")
+                return str(record_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to save size optimization data: {e}")
+            return None
+
 # Global instance
 postgresql_client = PostgreSQLClient()

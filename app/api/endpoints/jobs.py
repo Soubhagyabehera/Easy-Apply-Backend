@@ -45,6 +45,9 @@ class ManualJobRequest(BaseModel):
     contract_or_permanent: Optional[str] = None  # 'contract' or 'permanent'
     job_type: Optional[str] = None  # 'central', 'state', or 'psu'
 
+class BulkJobsRequest(BaseModel):
+    jobs: List[ManualJobRequest]
+
 class JobUpdateRequest(BaseModel):
     title: Optional[str] = None
     company: Optional[str] = None
@@ -221,6 +224,95 @@ def insert_manual_job(job: ManualJobRequest):
         return {
             "status": "error",
             "message": f"Failed to insert job: {str(e)}",
+            "data": None
+        }
+
+
+@router.post("/bulk")
+def insert_bulk_jobs(bulk_request: BulkJobsRequest):
+    """
+    Insert multiple jobs at once into the jobs table.
+    
+    This endpoint allows bulk insertion of job data with source tagged as "manual".
+    Accepts a list of jobs in the request body.
+    
+    Request body:
+    {
+        "jobs": [
+            {
+                "title": "Software Engineer",
+                "company": "Tech Corp",
+                "location": "Mumbai",
+                "apply_link": "https://example.com/apply",
+                "posted_date": "2024-12-31"
+            },
+            {
+                "title": "Data Analyst",
+                "company": "Data Inc",
+                "location": "Delhi",
+                "apply_link": "https://datainc.com/apply",
+                "posted_date": "2024-12-30"
+            }
+        ]
+    }
+    """
+    try:
+        logger.info("=" * 50)
+        logger.info("🔧 BULK JOBS INSERT ENDPOINT CALLED")
+        logger.info(f"📊 Number of jobs to insert: {len(bulk_request.jobs)}")
+        logger.info("=" * 50)
+        
+        if not bulk_request.jobs:
+            return {
+                "status": "error",
+                "message": "No jobs provided in the request",
+                "data": None
+            }
+        
+        # Prepare all jobs data for bulk insertion
+        jobs_to_insert = []
+        
+        for job in bulk_request.jobs:
+            logger.info(f"Processing job: {job.title} at {job.company}")
+            
+            # Prepare job data for insertion with all new fields
+            job_data = {
+                'title': job.title,
+                'company': job.company,
+                'location': job.location,
+                'apply_link': job.apply_link,
+                'posted_date': job.posted_date,
+                'vacancies': job.vacancies,
+                'fee': job.fee,
+                'job_description': job.job_description,
+                'eligibility_criteria': job.eligibility_criteria.dict() if job.eligibility_criteria else {},
+                'required_documents': job.required_documents or [],
+                'application_deadline': job.application_deadline,
+                'contract_or_permanent': job.contract_or_permanent,
+                'job_type': job.job_type,
+                'source': 'manual'  # Tag with source = "manual"
+            }
+            
+            jobs_to_insert.append(job_data)
+        
+        # Insert all jobs using existing batch method
+        inserted_count = postgresql_client.insert_jobs(jobs_to_insert)
+        
+        logger.info(f"Bulk insert result - Requested: {len(bulk_request.jobs)}, Inserted: {inserted_count}")
+        
+        return {
+            "status": "success",
+            "message": f"Bulk job insertion completed. {inserted_count} out of {len(bulk_request.jobs)} jobs inserted successfully.",
+            "requested_count": len(bulk_request.jobs),
+            "inserted_count": inserted_count,
+            "data": jobs_to_insert[:5]  # Return first 5 for preview
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in bulk job insertion: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to insert bulk jobs: {str(e)}",
             "data": None
         }
 
