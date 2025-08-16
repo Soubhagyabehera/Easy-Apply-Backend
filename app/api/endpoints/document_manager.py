@@ -6,7 +6,7 @@ Handles secure storage and automatic formatting of user documents for job applic
 import os
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from datetime import datetime

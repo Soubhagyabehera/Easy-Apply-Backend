@@ -47,7 +47,7 @@ def setup_environment():
 
 def main():
     """Main startup function"""
-    logger.info("Starting EasyApply Backend on Railway...")
+    logger.info("Starting EasyApply Backend...")
     
     # Setup environment
     setup_environment()
@@ -57,20 +57,26 @@ def main():
         import uvicorn
         from app.main import app
         
-        # Get port from Railway environment
+        # Get port from environment
         port = int(os.getenv("PORT", 8000))
         host = "0.0.0.0"
         
         logger.info(f"Starting server on {host}:{port}")
         
+        # Use single worker to avoid multiprocessing issues on Windows
         uvicorn.run(
-            app,
+            "app.main:app",
             host=host,
             port=port,
             log_level="info",
-            access_log=True
+            access_log=True,
+            workers=1,
+            reload=False,
+            use_colors=False
         )
         
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested")
     except Exception as e:
         logger.error(f"Failed to start server: {e}")
         sys.exit(1)

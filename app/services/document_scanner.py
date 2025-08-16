@@ -56,16 +56,35 @@ class DocumentScannerService:
             print(f"Warning: Could not initialize document scanner database tables: {e}")
     
     async def validate_image(self, file: UploadFile) -> bool:
-        """Validate uploaded image file for scanning"""
+        """Validate uploaded image file"""
+        
         if file.size and file.size > self.max_file_size:
             raise HTTPException(status_code=400, detail="File size exceeds 20MB limit")
         
         if not file.filename:
             raise HTTPException(status_code=400, detail="No filename provided")
         
+        # Handle files without extensions (like captured photos)
+        if '.' not in file.filename:
+            # For captured files without extension, check content type
+            if file.content_type and file.content_type.startswith('image/'):
+                print(f"Accepting file without extension based on content type: {file.content_type}")
+                return True
+            else:
+                print(f"File {file.filename} has no extension and no valid content type")
+                raise HTTPException(status_code=400, detail="File must have a valid image extension or content type")
+        
         file_ext = os.path.splitext(file.filename.lower())[1][1:]  # Remove dot
+        print(f"Validating file: {file.filename}, extension: {file_ext}, content_type: {file.content_type}")
+        
+        # Check both extension and content type for better validation
         if file_ext.upper() not in self.supported_input_formats:
-            raise HTTPException(status_code=400, detail=f"Unsupported format. Use: {', '.join(self.supported_input_formats)}")
+            # If extension check fails, try content type
+            if file.content_type and file.content_type.startswith('image/'):
+                print(f"Extension {file_ext} not supported, but content type {file.content_type} is valid")
+                return True
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported format. Use: {', '.join(self.supported_input_formats)}")
         
         return True
     
@@ -186,17 +205,31 @@ class DocumentScannerService:
             total_input_size = 0
             
             for idx, file in enumerate(files):
-                file_data = await file.read()
+                # Reset file pointer before reading
                 await file.seek(0)
+                file_data = await file.read()
                 total_input_size += len(file_data)
+                
+                print(f"Processing file {idx + 1}/{len(files)}: {file.filename}, size: {len(file_data)} bytes")
                 
                 if CV2_AVAILABLE:
                     # Load image with OpenCV
-                    nparr = np.frombuffer(file_data, np.uint8)
-                    cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if cv_image is None:
-                        raise HTTPException(status_code=400, detail=f"Could not decode image: {file.filename}")
+                    try:
+                        nparr = np.frombuffer(file_data, np.uint8)
+                        cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if cv_image is None:
+                            print(f"OpenCV failed to decode {file.filename}, falling back to PIL")
+                            # Fallback to PIL
+                            pil_image = Image.open(io.BytesIO(file_data))
+                            cv_image = np.array(pil_image.convert('RGB'))
+                            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+                    except Exception as cv_error:
+                        print(f"OpenCV processing failed for {file.filename}: {cv_error}")
+                        # Fallback to PIL
+                        pil_image = Image.open(io.BytesIO(file_data))
+                        cv_image = np.array(pil_image.convert('RGB'))
+                        cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
                     
                     # Auto-crop if enabled
                     if auto_crop:
@@ -241,12 +274,20 @@ class DocumentScannerService:
                     else:
                         pil_image = Image.fromarray(cv2.cvtColor(enhanced_image, cv2.COLOR_BGR2RGB))
                 else:
-                    # Fallback to PIL-only processing
-                    print(f"Processing {file.filename} with basic PIL enhancement (OpenCV not available)")
-                    pil_image = Image.open(io.BytesIO(file_data))
+                    # Fallback to PIL only
+                    try:
+                        pil_image = Image.open(io.BytesIO(file_data))
+                        print(f"PIL successfully opened {file.filename}")
+                    except Exception as pil_error:
+                        print(f"PIL failed to open {file.filename}: {pil_error}")
+                        raise HTTPException(status_code=400, detail=f"Could not process image: {file.filename}")
                     
-                    # Basic enhancement using PIL
-                    if enhancement_level != "light":
+                    # Convert to RGB if needed
+                    if pil_image.mode != 'RGB':
+                        pil_image = pil_image.convert('RGB')
+                    
+                    # Apply basic enhancement
+                    if enhancement_level == "medium":
                         # Apply basic sharpening
                         pil_image = pil_image.filter(ImageFilter.SHARPEN)
                     
@@ -260,6 +301,7 @@ class DocumentScannerService:
                     pil_image = pil_image.convert('RGB')
                 
                 processed_images.append(pil_image)
+                print(f"Successfully processed image {idx + 1}: {pil_image.size}")
             
             # Generate output based on format
             if output_format.upper() == "PDF":
@@ -274,13 +316,22 @@ class DocumentScannerService:
                     img_buffer.seek(0)
                     image_bytes_list.append(img_buffer.getvalue())
                 
-                # Create PDF
-                if page_size.upper() == "A4":
-                    layout_fun = img2pdf.get_layout_fun(img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
-                else:  # Letter
-                    layout_fun = img2pdf.get_layout_fun(img2pdf.in_to_pt(8.5), img2pdf.in_to_pt(11))
-                
-                pdf_bytes = img2pdf.convert(image_bytes_list, layout_fun=layout_fun)
+                # Create PDF with proper page size specification
+                try:
+                    if page_size.upper() == "A4":
+                        # A4 size in points (210mm x 297mm)
+                        page_width = img2pdf.mm_to_pt(210)
+                        page_height = img2pdf.mm_to_pt(297)
+                        pdf_bytes = img2pdf.convert(image_bytes_list, pagesize=(page_width, page_height))
+                    else:  # Letter
+                        # Letter size in points (8.5" x 11")
+                        page_width = img2pdf.in_to_pt(8.5)
+                        page_height = img2pdf.in_to_pt(11)
+                        pdf_bytes = img2pdf.convert(image_bytes_list, pagesize=(page_width, page_height))
+                except Exception as pdf_error:
+                    print(f"PDF creation with pagesize failed: {pdf_error}, trying without pagesize")
+                    # Fallback: create PDF without specific page size
+                    pdf_bytes = img2pdf.convert(image_bytes_list)
                 pdf_buffer.write(pdf_bytes)
                 pdf_buffer.seek(0)
                 
@@ -335,7 +386,16 @@ class DocumentScannerService:
             try:
                 postgresql_client.save_scan_data(scan_data)
             except Exception as e:
-                print(f"Warning: Could not save scan data: {e}")
+                print(f"Document scanning failed: {str(e)}")
+                print(f"Error type: {type(e).__name__}")
+                import traceback
+                print(f"Full traceback: {traceback.format_exc()}")
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "scan_id": scan_id,
+                    "processing_time_ms": int((time.time() - start_time) * 1000)
+                }
             
             return {
                 "success": True,
@@ -354,6 +414,10 @@ class DocumentScannerService:
             }
             
         except Exception as e:
+            print(f"Document scanning failed: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Document scanning failed: {str(e)}")
     
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
