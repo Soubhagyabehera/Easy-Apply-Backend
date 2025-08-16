@@ -43,7 +43,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
 @router.post("/auth/google")
 async def google_auth(request: dict):
     """
-    Authenticate user with Google OAuth ID token
+    Authenticate user with Google OAuth ID token or demo credentials
     Verifies the Google ID token and creates/returns user with JWT
     """
     try:
@@ -55,6 +55,85 @@ async def google_auth(request: dict):
                 detail="Missing Google ID token"
             )
         
+        # Check if this is a demo authentication request
+        if id_token_str.startswith('demo_'):
+            return await handle_demo_auth(request)
+        
+        # Handle real Google OAuth authentication
+        return await handle_google_oauth(request, id_token_str)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in authentication: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to authenticate"
+        )
+
+async def handle_demo_auth(request: dict):
+    """
+    Handle demo authentication without Google token validation
+    """
+    try:
+        # Extract demo user data from request
+        user_email = request.get('email')
+        user_name = request.get('name')
+        user_picture = request.get('picture', '')
+        user_id = request.get('sub')
+        
+        if not user_email or not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing demo user data"
+            )
+        
+        # Ensure users table exists
+        postgresql_client.ensure_users_table_exists()
+        
+        # Create or update demo user in database
+        user_data_for_db = {
+            "id": user_id,
+            "email": user_email,
+            "name": user_name or "Demo User",
+            "picture": user_picture,
+            "is_active": True
+        }
+        
+        # Store/update user in database
+        stored_user = postgresql_client.create_or_update_user(user_data_for_db)
+        
+        if not stored_user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to store demo user information"
+            )
+        
+        # Create JWT token
+        access_token = create_access_token(stored_user)
+        
+        logger.info(f"Demo user authenticated: {user_email}")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": stored_user
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in demo authentication: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to authenticate demo user"
+        )
+
+async def handle_google_oauth(request: dict, id_token_str: str):
+    """
+    Handle real Google OAuth authentication
+    """
+    try:
         # Verify the Google ID token
         try:
             idinfo = id_token.verify_oauth2_token(
@@ -107,18 +186,15 @@ async def google_auth(request: dict):
                 detail="Failed to store user information"
             )
         
-        # Use the database user data for JWT token
-        user_data = stored_user
-        
-        # Create JWT token using existing system
-        access_token = create_access_token(user_data)
+        # Create JWT token
+        access_token = create_access_token(stored_user)
         
         logger.info(f"User authenticated via Google: {user_email}")
         
         return {
             "access_token": access_token,
             "token_type": "bearer",
-            "user": user_data
+            "user": stored_user
         }
         
     except HTTPException:
