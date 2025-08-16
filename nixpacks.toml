@@ -1,4 +1,8 @@
-[packages]
-apt = ["libgl1", "libglib2.0-0"]
+[build]
+builder = "NIXPACKS"
 
+[phases.setup]
+nixPkgs = ["libGL", "glib"]
 
+# fallback: also ask for apt packages
+aptPkgs = ["libgl1", "libglib2.0-0"]
