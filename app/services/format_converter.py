@@ -239,13 +239,18 @@ class FormatConverterService:
                 img_buffer.seek(0)
                 image_bytes_list.append(img_buffer.getvalue())
             
-            # Create PDF
-            if page_size.upper() == "A4":
-                layout_fun = img2pdf.get_layout_fun(img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
-            else:  # Letter
-                layout_fun = img2pdf.get_layout_fun(img2pdf.in_to_pt(8.5), img2pdf.in_to_pt(11))
-            
-            pdf_bytes = img2pdf.convert(image_bytes_list, layout_fun=layout_fun)
+            # Create PDF with proper page size handling
+            try:
+                if page_size.upper() == "A4":
+                    # A4 size in points (595.276 x 841.89)
+                    pdf_bytes = img2pdf.convert(image_bytes_list, layout_fun=img2pdf.get_layout_fun((595.276, 841.89)))
+                else:  # Letter
+                    # Letter size in points (612 x 792)
+                    pdf_bytes = img2pdf.convert(image_bytes_list, layout_fun=img2pdf.get_layout_fun((612, 792)))
+            except Exception as layout_error:
+                # Fallback to simple conversion without layout function
+                print(f"Layout function failed, using simple conversion: {layout_error}")
+                pdf_bytes = img2pdf.convert(image_bytes_list)
             
             # Save to disk
             pdf_filename = f"converted_images_to_pdf.pdf"
@@ -356,6 +361,126 @@ class FormatConverterService:
                 output_data = text_content.encode('utf-8')
                 content_type = "text/plain"
                 
+            elif input_ext.upper() == "TXT" and target_format.upper() == "DOCX":
+                # Text to DOCX
+                from docx import Document
+                
+                doc = Document()
+                text_content = file_data.decode('utf-8', errors='ignore')
+                lines = text_content.split('\n')
+                
+                for line in lines:
+                    doc.add_paragraph(line)
+                
+                output_buffer = io.BytesIO()
+                doc.save(output_buffer)
+                output_buffer.seek(0)
+                output_data = output_buffer.getvalue()
+                content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                
+            elif input_ext.upper() == "DOCX" and target_format.upper() == "TXT":
+                # DOCX to Text
+                from docx import Document
+                
+                doc = Document(io.BytesIO(file_data))
+                text_content = ""
+                
+                for paragraph in doc.paragraphs:
+                    text_content += paragraph.text + "\n"
+                
+                output_data = text_content.encode('utf-8')
+                content_type = "text/plain"
+                
+            elif input_ext.upper() == "DOCX" and target_format.upper() == "PDF":
+                # DOCX to PDF (via text extraction then PDF creation)
+                from docx import Document
+                
+                doc = Document(io.BytesIO(file_data))
+                text_content = ""
+                
+                for paragraph in doc.paragraphs:
+                    text_content += paragraph.text + "\n"
+                
+                # Create PDF from extracted text
+                output_buffer = io.BytesIO()
+                c = canvas.Canvas(output_buffer, pagesize=letter)
+                
+                lines = text_content.split('\n')
+                y_position = 750
+                for line in lines:
+                    if y_position < 50:  # Start new page
+                        c.showPage()
+                        y_position = 750
+                    c.drawString(50, y_position, line[:80])  # Limit line length
+                    y_position -= 15
+                
+                c.save()
+                output_buffer.seek(0)
+                output_data = output_buffer.getvalue()
+                content_type = "application/pdf"
+                
+            elif input_ext.upper() == "PDF" and target_format.upper() == "DOCX":
+                # PDF to DOCX (via text extraction then DOCX creation)
+                from docx import Document
+                
+                pdf_reader = PdfReader(io.BytesIO(file_data))
+                text_content = ""
+                
+                for page in pdf_reader.pages:
+                    text_content += page.extract_text() + "\n"
+                
+                # Create DOCX from extracted text
+                doc = Document()
+                lines = text_content.split('\n')
+                
+                for line in lines:
+                    if line.strip():  # Skip empty lines
+                        doc.add_paragraph(line)
+                
+                output_buffer = io.BytesIO()
+                doc.save(output_buffer)
+                output_buffer.seek(0)
+                output_data = output_buffer.getvalue()
+                content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                
+            elif input_ext.upper() in ["JPG", "JPEG", "PNG", "BMP", "TIFF", "GIF", "WEBP"] and target_format.upper() == "DOCX":
+                # Image to DOCX (embed image in document)
+                from docx import Document
+                from docx.shared import Inches
+                
+                doc = Document()
+                
+                # Add a title
+                doc.add_heading('Image Document', 0)
+                
+                # Save image temporarily
+                temp_image_path = self.temp_dir / f"temp_image_{uuid.uuid4()}.{input_ext.lower()}"
+                with open(temp_image_path, 'wb') as temp_file:
+                    temp_file.write(file_data)
+                
+                try:
+                    # Add image to document with appropriate sizing
+                    paragraph = doc.add_paragraph()
+                    run = paragraph.runs[0] if paragraph.runs else paragraph.add_run()
+                    
+                    # Try to add image with width constraint
+                    try:
+                        run.add_picture(str(temp_image_path), width=Inches(6))
+                    except Exception:
+                        # If image is too large or has issues, try smaller size
+                        run.add_picture(str(temp_image_path), width=Inches(4))
+                        
+                finally:
+                    # Clean up temporary file
+                    if temp_image_path.exists():
+                        temp_image_path.unlink()
+                
+                output_buffer = io.BytesIO()
+                doc.save(output_buffer)
+                output_buffer.seek(0)
+                output_data = output_buffer.getvalue()
+                content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                
             else:
                 raise HTTPException(status_code=400, detail=f"Conversion from {input_ext.upper()} to {target_format.upper()} not supported")
             
@@ -411,6 +536,70 @@ class FormatConverterService:
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Document format conversion failed: {str(e)}")
+    
+    async def convert_image_format(
+        self,
+        file: UploadFile,
+        target_format: str,
+        quality: int = 90,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Convert image between different formats"""
+        
+        start_time = time.time()
+        conversion_id = str(uuid.uuid4())
+        
+        await self.validate_file(file, target_format)
+        
+        try:
+            file_data = await file.read()
+            await file.seek(0)
+            
+            # Load image
+            image = Image.open(io.BytesIO(file_data))
+            
+            # Convert format if needed
+            output_buffer = io.BytesIO()
+            if target_format.upper() == "JPG":
+                # Convert RGBA to RGB for JPEG
+                if image.mode == 'RGBA':
+                    image = image.convert('RGB')
+                image.save(output_buffer, format='JPEG', quality=quality)
+                file_ext = 'jpg'
+            else:  # PNG
+                image.save(output_buffer, format='PNG', quality=quality)
+                file_ext = 'png'
+            
+            output_buffer.seek(0)
+            output_data = output_buffer.getvalue()
+            
+            # Save to disk
+            output_filename = f"converted.{file_ext}"
+            storage_path = self.converted_files_dir / f"{conversion_id}.{file_ext}"
+            
+            with open(storage_path, 'wb') as f:
+                f.write(output_data)
+            
+            # Calculate processing time
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            
+            return {
+                "success": True,
+                "conversion_id": conversion_id,
+                "conversion_type": "image_format",
+                "input_format": os.path.splitext(file.filename.lower())[1][1:].upper(),
+                "output_format": target_format.upper(),
+                "input_filename": file.filename,
+                "output_filename": output_filename,
+                "input_size_mb": round(len(file_data) / (1024 * 1024), 2),
+                "output_size_mb": round(len(output_data) / (1024 * 1024), 2),
+                "processing_time_ms": processing_time_ms,
+                "download_url": f"/format-converter/download/{conversion_id}"
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Image format conversion failed: {str(e)}")
     
     def get_converted_file(self, conversion_id: str) -> Optional[Tuple[Path, str]]:
         """Get converted file path and content type by conversion_id"""

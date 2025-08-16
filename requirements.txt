@@ -22,3 +22,6 @@ opencv-python==4.10.0.84
 reportlab==4.0.7
 python-docx==1.1.0
 openpyxl==3.1.2
+rembg==2.0.67
+mediapipe==0.10.21
+scikit-image==0.22.0

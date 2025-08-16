@@ -120,6 +120,55 @@ async def convert_images_to_pdf(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Images to PDF conversion failed: {str(e)}")
 
+@router.post("/convert-to-image", response_model=ConversionResponse)
+async def convert_to_image(
+    file: UploadFile = File(..., description="File to convert to image"),
+    target_format: str = Form(..., pattern="^(JPG|PNG)$", description="Target image format")
+):
+    """Convert PDF or other files to image format"""
+    
+    try:
+        if file.content_type == "application/pdf":
+            # PDF to image conversion
+            result = await format_converter_service.convert_pdf_to_images(
+                file=file,
+                output_format=target_format,
+                dpi=200,
+                quality=90,
+                user_id=None,
+                session_id=None
+            )
+        else:
+            # Image format conversion
+            result = await format_converter_service.convert_image_format(
+                file=file,
+                target_format=target_format,
+                user_id=None,
+                session_id=None
+            )
+        
+        if result["success"]:
+            return ConversionResponse(
+                success=True,
+                conversion_id=result["conversion_id"],
+                conversion_type=result.get("conversion_type", "image_conversion"),
+                input_format=result.get("input_format"),
+                output_format=result.get("output_format"),
+                input_filename=result.get("input_filename"),
+                output_filename=result.get("output_filename", f"converted.{target_format.lower()}"),
+                input_size_mb=result.get("input_size_mb"),
+                output_size_mb=result.get("output_size_mb"),
+                processing_time_ms=result.get("processing_time_ms"),
+                download_url=f"/format-converter/download/{result['conversion_id']}"
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Image conversion failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image conversion failed: {str(e)}")
+
 @router.post("/document-format", response_model=ConversionResponse)
 async def convert_document_format(
     file: UploadFile = File(..., description="Document file to convert"),

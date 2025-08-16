@@ -6,8 +6,8 @@ from app.database.supabase_client import postgresql_client
 import logging
 
 app = FastAPI(
-    title="JobBot API",
-    description="JobBot Phase 1 Backend API",
+    title="Applyze API",
+    description="Applyze Backend API",
     version="1.0.0",
 )
 
@@ -27,7 +27,7 @@ app.include_router(api_router, prefix="/api/v1")
 async def startup_event():
     """Initialize database and other startup tasks"""
     logger = logging.getLogger(__name__)
-    logger.info("Starting JobBot API...")
+    logger.info("Starting Applyze API...")
     
     try:
         # Initialize PostgreSQL database
@@ -41,7 +41,7 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"message": "JobBot API is running!"}
+    return {"message": "Applyze API is running!"}
 
 @app.get("/health")
 async def health_check():

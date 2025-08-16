@@ -2,15 +2,12 @@ from pydantic_settings import BaseSettings
 from typing import List
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "JobBot API"
+    PROJECT_NAME: str = "Applyze API"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     
     # CORS
     ALLOWED_HOSTS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:5174", "http://localhost:5175"]
-    
-    # Database
-    DATABASE_URL: str = "sqlite:///./jobbot.db"
     
     # Security
     SECRET_KEY: str = "your-secret-key-here"

@@ -289,7 +289,7 @@ async def get_pdf_tools_info():
     """Get PDF tools capabilities and limits"""
     
     return {
-        "supported_operations": ["merge", "split", "compress"],
+        "supported_operations": ["merge", "split", "compress", "combine_documents", "pdf_to_images", "combine_pdfs"],
         "supported_formats": ["PDF"],
         "limits": {
             "max_file_size_mb": 50,
@@ -300,6 +300,190 @@ async def get_pdf_tools_info():
         "compression_levels": ["low", "medium", "high"],
         "split_types": ["pages", "range", "bookmarks"]
     }
+
+@router.post("/combine-documents", response_model=PDFOperationResponse)
+async def combine_documents_to_pdf(
+    files: List[UploadFile] = File(..., description="Documents to combine (PDFs, images - 2-20 files)"),
+):
+    """Combine different document types (certificates, marksheets, ID images) into a single PDF"""
+    
+    try:
+        result = await pdf_tools_service.combine_documents_to_pdf(
+            files=files,
+            user_id=None,  # TODO: Get from authentication
+            session_id=None  # TODO: Get from session
+        )
+        
+        if result["success"]:
+            file_id = result["file_id"]
+            
+            return PDFOperationResponse(
+                success=True,
+                operation="combine_documents",
+                file_id=file_id,
+                processed_filename=result["processed_filename"],
+                total_pages=result["total_pages"],
+                input_files=result["input_files"],
+                original_size_mb=result["original_size_mb"],
+                processed_size_mb=result["processed_size_mb"],
+                processing_time_ms=result["processing_time_ms"],
+                download_url=f"/pdf-tools/download/{file_id}"
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Document combination failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document combination failed: {str(e)}")
+
+@router.post("/pdf-to-images", response_model=BatchPDFResponse)
+async def pdf_to_images(
+    file: UploadFile = File(..., description="PDF file to convert to images"),
+    image_format: str = Form(default="png", pattern="^(png|jpg|jpeg)$", description="Output image format"),
+    dpi: int = Form(default=150, ge=72, le=300, description="Image DPI (72-300)")
+):
+    """Convert each page of PDF to individual images"""
+    
+    try:
+        result = await pdf_tools_service.pdf_to_images(
+            file=file,
+            image_format=image_format,
+            dpi=dpi,
+            user_id=None,  # TODO: Get from authentication
+            session_id=None  # TODO: Get from session
+        )
+        
+        if result["success"]:
+            batch_id = result["batch_id"]
+            
+            return BatchPDFResponse(
+                success=True,
+                operation="pdf_to_images",
+                batch_id=batch_id,
+                input_filename=result["input_filename"],
+                total_pages=result["total_pages"],
+                output_files=result["output_images"],
+                files=result["images"],
+                processing_time_ms=result["processing_time_ms"],
+                download_all_url=f"/pdf-tools/download-images/{batch_id}"
+            )
+        else:
+            raise HTTPException(status_code=500, detail="PDF to images conversion failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF to images conversion failed: {str(e)}")
+
+@router.post("/combine-pdfs", response_model=PDFOperationResponse)
+async def combine_pdfs(
+    files: List[UploadFile] = File(..., description="PDF files to combine (2-10 files)"),
+):
+    """Combine multiple PDF files into one"""
+    
+    try:
+        result = await pdf_tools_service.combine_pdfs(
+            files=files,
+            user_id=None,  # TODO: Get from authentication
+            session_id=None  # TODO: Get from session
+        )
+        
+        if result["success"]:
+            file_id = result["file_id"]
+            
+            return PDFOperationResponse(
+                success=True,
+                operation="combine_pdfs",
+                file_id=file_id,
+                processed_filename=result["processed_filename"],
+                total_pages=result["total_pages"],
+                input_files=result["input_files"],
+                original_size_mb=result["original_size_mb"],
+                processed_size_mb=result["processed_size_mb"],
+                processing_time_ms=result["processing_time_ms"],
+                download_url=f"/pdf-tools/download/{file_id}"
+            )
+        else:
+            raise HTTPException(status_code=500, detail="PDF combination failed")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF combination failed: {str(e)}")
+
+@router.get("/download-image/{image_id}")
+async def download_processed_image(image_id: str):
+    """Download a processed image file"""
+    
+    try:
+        file_info = pdf_tools_service.get_processed_image(image_id)
+        if not file_info:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        file_path, content_type = file_info
+        
+        def file_generator():
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(8192):
+                    yield chunk
+        
+        return StreamingResponse(
+            file_generator(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={file_path.name}"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image download failed: {str(e)}")
+
+@router.get("/download-images/{batch_id}")
+async def download_batch_images(batch_id: str):
+    """Download all processed images in a batch as a ZIP file"""
+    
+    try:
+        # Create a ZIP file with all processed images
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Get all image files from the pdf_images directory
+            images_dir = pdf_tools_service.pdf_images_dir
+            
+            if not images_dir.exists():
+                raise HTTPException(status_code=404, detail="No processed images found")
+            
+            files_added = 0
+            for file_path in images_dir.glob("*"):
+                if file_path.is_file() and file_path.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                    # Add file to ZIP with just the filename (not full path)
+                    zip_file.write(file_path, file_path.name)
+                    files_added += 1
+            
+            if files_added == 0:
+                raise HTTPException(status_code=404, detail="No image files found for batch")
+        
+        zip_buffer.seek(0)
+        
+        def zip_generator():
+            while chunk := zip_buffer.read(8192):
+                yield chunk
+        
+        return StreamingResponse(
+            zip_generator(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=pdf_images_{batch_id}.zip"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image batch download failed: {str(e)}")
 
 @router.get("/health")
 async def health_check():
@@ -318,8 +502,9 @@ async def health_check():
                 "merge": True,
                 "split": True,
                 "compress": True,
-                "extract": False,  # Not implemented yet
-                "convert": False   # Not implemented yet
+                "combine_documents": True,
+                "pdf_to_images": True,
+                "combine_pdfs": True
             }
         }
         

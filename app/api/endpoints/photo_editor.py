@@ -16,13 +16,15 @@ from app.services.photo_editor import photo_editor_service
 router = APIRouter(tags=["Photo Editor"])
 
 class ProcessImageRequest(BaseModel):
-    """Request model for image processing parameters"""
+    """Request model for image processing parameters with advanced features"""
     width: int = Field(default=200, ge=50, le=4000, description="Output width in pixels")
     height: int = Field(default=200, ge=50, le=4000, description="Output height in pixels")
     output_format: str = Field(default="JPG", pattern="^(JPG|PNG|PDF)$", description="Output format")
     background_color: Optional[str] = Field(default=None, pattern="^#[0-9A-Fa-f]{6}$", description="Background color in hex format")
-    maintain_aspect_ratio: bool = Field(default=False, description="Maintain original aspect ratio")
-    max_file_size_kb: Optional[int] = Field(default=None, ge=50, le=2048, description="Maximum output file size in KB")
+    maintain_aspect_ratio: bool = Field(default=True, description="Maintain original aspect ratio (default: True)")
+    max_file_size_kb: Optional[int] = Field(default=None, ge=10, le=2048, description="Maximum output file size in KB (10KB-2MB)")
+    remove_background: bool = Field(default=False, description="Remove background using AI (rembg)")
+    auto_face_crop: bool = Field(default=False, description="Automatically crop around detected face for ID/passport photos")
 
 class ProcessImageResponse(BaseModel):
     """Response model for processed image"""
@@ -53,8 +55,10 @@ async def process_single_image(
     height: int = Form(200, ge=50, le=4000, description="Output height in pixels"),
     output_format: str = Form("JPG", pattern="^(JPG|PNG|PDF)$", description="Output format"),
     background_color: Optional[str] = Form(None, description="Background color in hex format"),
-    maintain_aspect_ratio: bool = Form(False, description="Maintain original aspect ratio"),
-    max_file_size_kb: Optional[int] = Form(None, ge=50, le=2048, description="Maximum output file size in KB")
+    maintain_aspect_ratio: bool = Form(True, description="Maintain original aspect ratio (default: True)"),
+    max_file_size_kb: Optional[int] = Form(None, ge=10, le=2048, description="Maximum output file size in KB (10KB-2MB)"),
+    remove_background: bool = Form(False, description="Remove background using AI (rembg)"),
+    auto_face_crop: bool = Form(False, description="Automatically crop around detected face for ID/passport photos")
 ):
     """Process a single image with specified parameters"""
     
@@ -67,6 +71,8 @@ async def process_single_image(
             background_color=background_color,
             maintain_aspect_ratio=maintain_aspect_ratio,
             max_file_size_kb=max_file_size_kb,
+            remove_background=remove_background,
+            auto_face_crop=auto_face_crop,
             user_id=None,  # TODO: Get from authentication
             session_id=None  # TODO: Get from session
         )
@@ -102,8 +108,10 @@ async def process_batch_images(
     height: int = Form(200, ge=50, le=4000, description="Output height in pixels"),
     output_format: str = Form("JPG", pattern="^(JPG|PNG|PDF)$", description="Output format"),
     background_color: Optional[str] = Form(None, description="Background color in hex format"),
-    maintain_aspect_ratio: bool = Form(False, description="Maintain original aspect ratio"),
-    max_file_size_kb: Optional[int] = Form(None, ge=50, le=2048, description="Maximum output file size in KB")
+    maintain_aspect_ratio: bool = Form(True, description="Maintain original aspect ratio (default: True)"),
+    max_file_size_kb: Optional[int] = Form(None, ge=10, le=2048, description="Maximum output file size in KB (10KB-2MB)"),
+    remove_background: bool = Form(False, description="Remove background using AI (rembg)"),
+    auto_face_crop: bool = Form(False, description="Automatically crop around detected face for ID/passport photos")
 ):
     """Process multiple images with the same parameters"""
     
@@ -119,6 +127,8 @@ async def process_batch_images(
             background_color=background_color,
             maintain_aspect_ratio=maintain_aspect_ratio,
             max_file_size_kb=max_file_size_kb,
+            remove_background=remove_background,
+            auto_face_crop=auto_face_crop,
             user_id=None,  # TODO: Get from authentication
             session_id=None  # TODO: Get from session
         )
@@ -182,12 +192,37 @@ async def download_processed_image(file_id: str):
     
     try:
         print(f"DEBUG: Attempting to download file_id: {file_id}")
-        file_info = photo_editor_service.get_processed_file(file_id)
-        if not file_info:
+        
+        # Direct file lookup in processed_files directory
+        from pathlib import Path
+        processed_files_dir = Path("processed_files")
+        
+        # Try different file extensions
+        possible_extensions = ['jpg', 'jpeg', 'png', 'pdf']
+        file_path = None
+        content_type = None
+        
+        for ext in possible_extensions:
+            potential_path = processed_files_dir / f"{file_id}.{ext}"
+            print(f"DEBUG: Checking path: {potential_path}")
+            
+            if potential_path.exists() and potential_path.is_file():
+                file_path = potential_path
+                # Determine content type based on file extension
+                if ext in ['jpg', 'jpeg']:
+                    content_type = "image/jpeg"
+                elif ext == 'png':
+                    content_type = "image/png"
+                elif ext == 'pdf':
+                    content_type = "application/pdf"
+                else:
+                    content_type = "application/octet-stream"
+                print(f"DEBUG: Found file at: {file_path}")
+                break
+        
+        if not file_path:
             print(f"DEBUG: File not found for file_id: {file_id}")
             raise HTTPException(status_code=404, detail="File not found")
-        
-        file_path, content_type = file_info
         
         def file_generator():
             with open(file_path, 'rb') as f:

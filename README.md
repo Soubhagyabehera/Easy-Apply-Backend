@@ -1,6 +1,6 @@
-# JobBot Backend API
+# Applyze Backend API
 
-FastAPI backend for JobBot Phase 1.
+FastAPI backend for Applyze Phase 1.
 
 ## Features
 
